@@ -11,7 +11,7 @@
 
 \begin{document}
 
-\title{Performance Analysis of a Predictive Hybrid Cache Eviction Algorithm for Distributed Systems\\}
+\title{Performance Analysis of a Time-Decayed Hybrid Cache Eviction Algorithm for Distributed Systems\\}
 
 \author{\IEEEauthorblockN{Eshant Gupta}
 \IEEEauthorblockA{\textit{Enrollment No: LCB2023016} \\
@@ -27,72 +27,86 @@ Lucknow, India}
 \maketitle
 
 \begin{abstract}
-Efficient cache eviction policies are critical for maintaining high performance and low latency in distributed web architectures. Standard algorithms such as Least Recently Used (LRU) and Least Frequently Used (LFU) suffer from specific edge-case inefficiencies, particularly cache pollution and stale data retention. In this paper, we propose and evaluate a Time-Decayed Least Frequently Used (TD-LFU) algorithm, designed to dynamically balance recency and frequency metrics. Through simulated benchmarking against synthetic Zipfian distributed workloads, our results demonstrate that TD-LFU consistently outperforms standard LRU and LFU policies, achieving a higher cache hit rate while mitigating memory bloat. This research provides a scalable memory optimization approach for modern distributed systems.
+Efficient cache eviction policies are critical for maintaining high performance and low latency in distributed web architectures. Standard algorithms such as Least Recently Used (LRU) and Least Frequently Used (LFU) suffer from specific edge-case inefficiencies, namely cache pollution and stale data retention respectively. In this paper, we propose and evaluate a Time-Decayed Least Frequently Used (TD-LFU) algorithm that introduces three innovations over standard LFU: periodic halving of frequency scores to prevent stale data retention, global frequency memory to preserve evicted items' access history, and an admission filter to resist cache pollution. Through simulated benchmarking against synthetic Zipfian workloads with trend shifts and cache pollution, our results demonstrate that TD-LFU consistently outperforms standard LRU and LFU policies by up to 11\% in cache hit rate under memory-constrained conditions.
 \end{abstract}
 
 \begin{IEEEkeywords}
-Cache Eviction, LRU, LFU, Distributed Systems, Time-Decayed Algorithms, Data Structures.
+Cache Eviction, LRU, LFU, Distributed Systems, Time-Decayed Algorithms, Admission Filter.
 \end{IEEEkeywords}
 
 \section{Introduction}
 Modern distributed architectures, such as Content Delivery Networks (CDNs) and memory caches (e.g., Redis, Memcached), rely heavily on in-memory data storage to minimize database read latency. Because memory capacity is strictly bounded, systems must continuously evict older data to accommodate new incoming requests. The efficiency of the chosen cache eviction policy directly dictates the overall system throughput.
 
-Traditional approaches primarily utilize the Least Recently Used (LRU) or Least Frequently Used (LFU) algorithms. LRU evicts the item that has not been accessed for the longest time, which is highly effective for sequential access patterns but suffers from "cache pollution" when a sudden burst of one-time data flushes the active working set. LFU, conversely, evicts the item with the lowest access count. While LFU excels at preserving globally popular data, it falls victim to "cache bloat," where historically popular items that are no longer requested remain in the cache indefinitely.
+Traditional approaches primarily utilize the Least Recently Used (LRU) or Least Frequently Used (LFU) algorithms. LRU evicts the item that has not been accessed for the longest time, which is effective for sequential access patterns but suffers from \textit{cache pollution}---when a sudden burst of one-time requests (e.g., bot scans) flushes the active working set from memory. LFU, conversely, evicts the item with the lowest access count. While LFU excels at preserving globally popular data, it falls victim to \textit{cache bloat}, where historically popular items that are no longer requested remain in the cache indefinitely, blocking new trending content.
 
-To resolve these inherent trade-offs, this research proposes a Time-Decayed Least Frequently Used (TD-LFU) algorithm. TD-LFU introduces a mathematical decay factor to frequency scores, elegantly ensuring that historically popular data loses relevance over time if not continuously requested.
+To resolve these inherent trade-offs, this research proposes the Time-Decayed Least Frequently Used (TD-LFU) algorithm, which combines three mechanisms to address the weaknesses of both LRU and LFU simultaneously.
 
 \section{Proposed Algorithm: TD-LFU}
-The Time-Decayed LFU algorithm operates on a hybrid heuristic model. Every cached item $i$ is assigned a continuous score $S_i$. 
-Upon a cache hit for item $i$, its score is updated according to:
-\begin{equation}
-S_i = (S_i \times \alpha) + 1.0
-\end{equation}
-where $\alpha \in (0, 1)$ is the decay factor. If the cache reaches maximum capacity, the item with the minimum score $\min(S)$ is selected for eviction.
+The TD-LFU algorithm introduces three innovations over standard LFU:
 
-This approach provides a self-regulating mechanism: an item accessed 100 times yesterday but 0 times today will see its score decay, allowing a newer, trending item to take its place.
+\subsection{Periodic Halving}
+Every $N$ requests (where $N$ is a configurable halving interval), all global frequency scores are simultaneously multiplied by 0.5. This ensures that historically popular items gradually lose their accumulated advantage. For an item $i$ with frequency score $f_i$, after $k$ halving epochs:
+\begin{equation}
+f_i' = f_i \times 0.5^k
+\end{equation}
+An item accessed 500 times in Phase 1 but never in Phase 2 will have its score reduced to $500 \times 0.5^k$, allowing new trending items to surpass it.
+
+\subsection{Global Frequency Memory}
+Unlike standard LFU, which resets an item's frequency to 1 upon re-admission after eviction, TD-LFU maintains a global frequency table for \textit{all} observed items, including those not currently cached. If a popular item is temporarily evicted due to a transient noise burst, it returns to the cache with its accumulated (decayed) frequency intact, preventing unnecessary re-eviction.
+
+\subsection{Admission Filter}
+A new item is admitted to the cache only if its global frequency score $f_{new}$ is greater than or equal to the eviction victim's frequency score $f_{victim}$:
+\begin{equation}
+\text{Admit if: } f_{new} \geq f_{victim}
+\end{equation}
+This mechanism prevents cache pollution: one-time noise items (e.g., bot scan requests with $f = 1$) cannot evict established popular items whose frequency scores are significantly higher. This approach is inspired by the TinyLFU admission policy used in production-grade caching libraries.
 
 \section{Experimental Methodology}
-To validate the efficacy of TD-LFU, a Python-based simulation environment was developed. The simulator replicates a distributed API gateway handling highly concurrent traffic\footnote{The simulation source code and dataset generator are open-sourced: \texttt{https://github.com/eshant742/Cache-Simulation}}. 
+To validate the efficacy of TD-LFU, a Python-based simulation environment was developed\footnote{Source code: \texttt{https://github.com/eshant742/Cache-Simulation}}.
 
 \subsection{Workload Generation}
-Web traffic universally follows a Zipfian distribution, where a small percentage of keys (e.g., viral videos, trending articles) account for the vast majority of requests. We synthesized a dataset of 100,000 requests distributed over a vocabulary size of 10,000 unique keys, utilizing a Zipf parameter $s = 1.2$.
+A synthetic workload of 100,000 requests was generated with three realistic characteristics:
+\begin{enumerate}
+    \item \textbf{Zipfian Distribution ($\alpha = 0.9$):} Web traffic follows a Zipfian distribution where a small percentage of items account for the majority of requests.
+    \item \textbf{Trend Shifts:} The workload contains 4 distinct popularity phases, each with a completely different set of popular items, simulating the dynamic nature of viral content.
+    \item \textbf{Cache Pollution:} 20\% of all traffic consists of random bot-generated requests interleaved throughout the workload, simulating real-world web crawler activity.
+\end{enumerate}
 
 \subsection{Benchmarked Configurations}
 Three cache policies were implemented and tested concurrently:
 \begin{enumerate}
-    \item \textbf{LRU Cache:} Implemented via an OrderedDict for $O(1)$ access.
-    \item \textbf{LFU Cache:} Implemented using frequency mapping.
-    \item \textbf{TD-LFU Cache:} The proposed algorithm, utilizing a decay factor of $\alpha = 0.99$.
+    \item \textbf{LRU Cache:} Implemented via an OrderedDict for $O(1)$ access and eviction.
+    \item \textbf{LFU Cache:} Standard frequency-based eviction with frequency reset on re-admission.
+    \item \textbf{TD-LFU Cache:} The proposed algorithm with a halving interval of 5,000 requests.
 \end{enumerate}
 
-The caches were evaluated across escalating memory capacities (100, 500, 1000, and 2000 items).
-
 \section{Results and Analysis}
-The primary performance metric evaluated was the Cache Hit Rate (CHR), defined as the percentage of requests successfully served from memory without requiring a secondary database read.
+The primary performance metric evaluated was the Cache Hit Rate (CHR), defined as the percentage of requests successfully served from memory.
 
 \begin{table}[htbp]
 \caption{Cache Hit Rate (\%) across varying capacities}
 \begin{center}
-\begin{tabular}{lccc}
+\begin{tabular}{lcccc}
 \toprule
-\textbf{Capacity} & \textbf{LRU} & \textbf{LFU} & \textbf{TD-LFU (Proposed)} \\
+\textbf{Capacity} & \textbf{LRU} & \textbf{LFU} & \textbf{TD-LFU} & \textbf{Gain} \\
 \midrule
-100  & 42.15\% & 44.30\% & \textbf{46.12\%} \\
-500  & 55.40\% & 58.10\% & \textbf{61.05\%} \\
-1000 & 68.20\% & 71.05\% & \textbf{74.50\%} \\
-2000 & 81.10\% & 83.25\% & \textbf{86.00\%} \\
+50   & 13.53\% & 7.23\%  & \textbf{24.99\%} & +11.46\% \\
+100  & 18.76\% & 10.17\% & \textbf{29.78\%} & +11.01\% \\
+500  & 32.96\% & 22.25\% & \textbf{41.49\%} & +8.52\%  \\
+1000 & 39.93\% & 30.17\% & \textbf{46.18\%} & +6.25\%  \\
+2000 & 47.53\% & 39.00\% & \textbf{50.67\%} & +3.14\%  \\
 \bottomrule
 \end{tabular}
 \label{tab:results}
 \end{center}
 \end{table}
 
-As demonstrated in Table \ref{tab:results}, the TD-LFU algorithm consistently outperformed both baseline models across all tested capacities. At a capacity of 1000 items, TD-LFU achieved a 74.50\% hit rate, representing a measurable absolute improvement over LRU and pure LFU.
+As demonstrated in Table \ref{tab:results}, TD-LFU consistently outperformed both baseline algorithms across all tested capacities. Under strict memory constraints (capacity 50--100), where eviction decisions are most critical, TD-LFU achieved improvements of over 11\% compared to the best-performing baseline. The improvement gracefully decreases at higher capacities, which is the expected behavior: larger caches reduce eviction pressure, diminishing the impact of any eviction policy.
 
-The superiority of TD-LFU stems from its resistance to cache pollution (unlike LRU) and its ability to evict stale data (unlike LFU). By multiplying the score by $0.99$ on every hit, old items slowly lose their dominance if they are no longer actively requested.
+TD-LFU's superiority stems from its three-pronged defense: the \textit{admission filter} blocks bot-generated noise from displacing popular items (addressing LRU's weakness), while \textit{periodic halving} ensures stale data from past trends is gradually released (addressing LFU's weakness). \textit{Global frequency memory} further strengthens the algorithm by preserving the access history of temporarily evicted popular items.
 
 \section{Conclusion}
-This research successfully developed and benchmarked the Time-Decayed LFU algorithm. The empirical data confirms that incorporating a mathematical decay factor into frequency-based eviction models yields a robust, highly efficient caching strategy suitable for modern distributed systems. Future work may explore dynamically adjusting the decay factor $\alpha$ via machine learning based on real-time traffic variance.
+This research successfully developed and benchmarked the Time-Decayed LFU (TD-LFU) algorithm with three key innovations: periodic halving, global frequency memory, and an admission filter. Empirical results confirm that TD-LFU yields a robust, highly efficient caching strategy that outperforms industry-standard LRU and LFU by up to 11\% under realistic, adversarial workloads. Future work may explore adaptive halving intervals tuned via reinforcement learning, and evaluation against production-grade algorithms such as W-TinyLFU and ARC.
 
 \vspace{2cm}
 
